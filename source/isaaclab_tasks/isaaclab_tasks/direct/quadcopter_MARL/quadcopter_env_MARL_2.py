@@ -211,15 +211,17 @@ class QuadcopterEnv4(DirectMARLEnv):
         # print(self.tau.view(self.num_envs, 3, 1).shape) # (32, 3, 1)
         # print(torch.matmul(torch.transpose(b1, 1, 2), self.tau.view(self.num_envs, 3, 1)).shape)
         # print((0.035 * W[:, 2] * W[:, 1]).shape)
-        self.M1 = torch.squeeze(torch.matmul(torch.transpose(b1, 1, 2), self.tau.view(self.num_envs, 3, 1))) + 0.000032347 * W[:, 2] * W[:, 1]  # M1
-        self.M2 = torch.squeeze(torch.matmul(torch.transpose(b2, 1, 2), self.tau.view(self.num_envs, 3, 1))) - 0.000032347 * W[:, 2] * W[:, 0]  # M2
+        self.M1 = torch.squeeze(torch.matmul(torch.transpose(b1, 1, 2), self.tau.view(self.num_envs, 3, 1))) + 0.032347 * W[:, 2] * W[:, 1]  # M1
+        self.M2 = torch.squeeze(torch.matmul(torch.transpose(b2, 1, 2), self.tau.view(self.num_envs, 3, 1))) - 0.032347 * W[:, 2] * W[:, 0]  # M2
         # print(self.M1.shape)
         self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self.f + 1.0) / 2.0
-        self._moment[:, 0, 0] = self.cfg.moment_scale * torch.squeeze(self.M1)
-        self._moment[:, 0, 1] = self.cfg.moment_scale * torch.squeeze(self.M2)
+        self._moment[:, 0, 0] = self.cfg.moment_scale * torch.squeeze(self.tau[:, 1])
+        self._moment[:, 0, 1] = self.cfg.moment_scale * torch.squeeze(self.tau[:, 2])
         self._moment[:, 0, 2] = self.cfg.moment_scale * torch.squeeze(self.M3)
-        #print(self._thrust.shape)
-        #print(self._moment.shape)
+        # print("thrust")
+        # print(self._thrust)
+        # print("moment")
+        # print(self._moment)
     def _apply_action(self):
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
