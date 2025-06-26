@@ -9,8 +9,8 @@ import gymnasium as gym
 import torch
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, ArticulationCfg, RigidObjectCfg, RigidObject
-from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg
+from isaaclab.assets import Articulation, ArticulationCfg
+from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.scene import InteractiveSceneCfg
@@ -22,21 +22,14 @@ from isaaclab.utils.math import subtract_frame_transforms
 ##
 # Pre-defined configs
 ##
-# from omni.isaac.lab_assets import CRAZYFLIE_CFG  # isort: skip
-# from omni.isaac.lab.markers import CUBOID_MARKER_CFG  # isort: skip
-
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
-import numpy as np
-from math import pi
-from scipy.spatial.transform import Rotation as R
 
-
-class QuadcopterEnvWindow3(BaseEnvWindow):
+class QuadcopterEnvWindow(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
 
-    def __init__(self, env: QuadcopterEnv3, window_name: str = "IsaacLab"):
+    def __init__(self, env: QuadcopterEnv, window_name: str = "IsaacLab"):
         """Initialize the window.
 
         Args:
@@ -54,27 +47,21 @@ class QuadcopterEnvWindow3(BaseEnvWindow):
 
 
 @configclass
-class QuadcopterEnvCfg3(DirectMARLEnvCfg):
+class QuadcopterEnvCfgSARL(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 2
-    #action_space = 4
-    ### ------------------------------------------
-    possible_agents = ["T1", "T2", "T3", "T4", "M"]
-    action_spaces = {"T1": 1, "T2": 1, "T3": 1, "T4": 1, "M": 3}
-    ### ------------------------------------------
-    #observation_space = 12
-    observation_spaces = {"T1": 15, "T2": 15, "T3": 15, "T4": 15, "M": 15}
-    state_space = -1
+    action_space = 4
+    observation_space = 15
+    state_space = 0
     debug_vis = True
 
-    ui_window_class_type = QuadcopterEnvWindow3
+    ui_window_class_type = QuadcopterEnvWindow
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 100,
         render_interval=decimation,
-        # disable_contact_processing=True,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -108,51 +95,18 @@ class QuadcopterEnvCfg3(DirectMARLEnvCfg):
     # reward scales
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
-    distance_to_goal_reward_scale = 20.0
-
-    # obstacles
-    # Create separate groups called "Origin1", "Origin2", "Origin3"
-    # Each group will have a robot in it
-    # Rigid Object
-    # cuboid1_cfg: RigidObjectCfg = RigidObjectCfg(
-    #     prim_path="/World/envs/env_.*/object1",
-    #     spawn=sim_utils.CuboidCfg(
-    #         size=[0.5, 1.0, 2.5],
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-    #         mass_props=sim_utils.MassPropertiesCfg(mass=1000.0),
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 1.0, 0.0)),
-    #         physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.5),
-    #     ),
-    #     init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, -1.5, 0.0), rot=(1.0, 0.0, 0.0, 0.0)),
-    # )
-    # cuboid2_cfg: RigidObjectCfg = RigidObjectCfg(
-    #     prim_path="/World/envs/env_.*/object2",
-    #     spawn=sim_utils.CuboidCfg(
-    #         size=[0.5, 1.0, 2.5],
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-    #         mass_props=sim_utils.MassPropertiesCfg(mass=1000.0),
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 1.0, 0.0)),
-    #         physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.5),
-    #     ),
-    #     init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 1.5, 0.0), rot=(1.0, 0.0, 0.0, 0.0)),
-    # )
+    distance_to_goal_reward_scale = 15.0
 
 
-class QuadcopterEnv3(DirectMARLEnv):
-    cfg: QuadcopterEnvCfg3
+class QuadcopterEnvSARL(DirectRLEnv):
+    cfg: QuadcopterEnvCfg
 
-    def __init__(self, cfg: QuadcopterEnvCfg3, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Total thrust and moment applied to the base of the quadcopter
-        #self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
+        self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
-        #print("action:")
-        #print()
-        #print("thrust:")
-        #print(self._thrust.shape)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
@@ -182,42 +136,23 @@ class QuadcopterEnv3(DirectMARLEnv):
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
-        # #object
-        # self.Cuboid_object1 = RigidObject(self.cfg.cuboid1_cfg)
-        # self.scene.rigid_objects["object1"] = self.Cuboid_object1
-        # self.Cuboid_object2 = RigidObject(self.cfg.cuboid2_cfg)
-        # self.scene.rigid_objects["object2"] = self.Cuboid_object2
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-        # clone, filter, and replicate
+        # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
-        self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        act1 = actions["T1"].clone().clamp(-1.0, 1.0)
-        act2 = actions["T2"].clone().clamp(-1.0, 1.0)
-        act3 = actions["T3"].clone().clamp(-1.0, 1.0)
-        act4 = actions["T4"].clone().clamp(-1.0, 1.0)
-        thru = actions["M"].clone().clamp(-1.0, 1.0)
-
-        #self._actions = actions.clone().clamp(-1.0, 1.0)
-        actTotal = (act1 + act2 + act3 + act4) / 4.0
-        actTotal += 1
-        #print("ACTT")
-        #print(actTotal.shape) # (32, 1)
-        #print(torch.squeeze(actTotal).shape) # (32)
-        #self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
-        #self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
+        self._actions = actions.clone().clamp(-1.0, 1.0)
         self._thrust[:, 0, :2] = 0.0
-        self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (torch.squeeze(actTotal)) / 2.0
-        self._moment[:, 0, :] = self.cfg.moment_scale * torch.squeeze(thru)
-        # print(self._thrust)
-        #print(self._moment.shape)
+        self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
+        self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
+        # print("moment")
+        # print(self._moment)
 
         # wind external forces
         external_forces = self.w_coefficient * self.wind_vel
@@ -244,21 +179,10 @@ class QuadcopterEnv3(DirectMARLEnv):
             ],
             dim=-1,
         )
-        observations = {"T1": obs,
-                        "T2": obs,
-                        "T3": obs,
-                        "T4": obs,
-                        "M": obs,}
-        #print("OBS : ")
-        #print(observations)
-        # for quat in self._robot.data.root_link_state_w[:, 3:7]:
-        #     print(quat)
-        #
-        # torch.
-
+        observations = {"policy": obs}
         return observations
 
-    def _get_rewards(self) -> dict[str, torch.Tensor]:
+    def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self._robot.data.root_com_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_com_ang_vel_b), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_link_pos_w, dim=1)
@@ -272,22 +196,12 @@ class QuadcopterEnv3(DirectMARLEnv):
         # Logging
         for key, value in rewards.items():
             self._episode_sums[key] += value
-            # print("haha")
-            # print(reward.shape)
-
-        return {"T1": reward, "T2": reward, "T3": reward, "T4": reward, "M": reward}
+        return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = torch.logical_or(
-            self._robot.data.root_link_pos_w[:, 2] < 0.05, self._robot.data.root_link_pos_w[:, 2] > 2.5
-        )
-        # print(self.max_episode_length)
-        ###
-        terminated = {agent: died for agent in self.cfg.possible_agents}
-        time_outs = {agent: time_out for agent in self.cfg.possible_agents}
-
-        return terminated, time_outs
+        died = torch.logical_or(self._robot.data.root_link_pos_w[:, 2] < 0.05, self._robot.data.root_link_pos_w[:, 2] > 2.5)
+        return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -297,7 +211,6 @@ class QuadcopterEnv3(DirectMARLEnv):
         final_distance_to_goal = torch.linalg.norm(
             self._desired_pos_w[env_ids] - self._robot.data.root_link_pos_w[env_ids], dim=1
         ).mean()
-        '''
         extras = dict()
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
@@ -310,7 +223,6 @@ class QuadcopterEnv3(DirectMARLEnv):
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
         self.extras["log"].update(extras)
-        '''
 
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
@@ -318,8 +230,7 @@ class QuadcopterEnv3(DirectMARLEnv):
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
-        #self._actions[env_ids] = 0.0
-
+        self._actions[env_ids] = 0.0
         # Sample new commands
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-4.0, 4.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
@@ -335,7 +246,7 @@ class QuadcopterEnv3(DirectMARLEnv):
 
         # reset wind velocity
         # 1. constant wind., same in all envs
-        self.wind_vel[env_ids, 0] = 5.0 # m/s
+        self.wind_vel[env_ids, 0] = 5.0  # m/s
         self.wind_vel[env_ids, 1] = 0.0
         self.wind_vel[env_ids, 2] = 0.0
 
