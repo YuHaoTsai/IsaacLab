@@ -33,10 +33,10 @@ from math import pi
 from scipy.spatial.transform import Rotation as R
 
 
-class QuadcopterEnvWindow3(BaseEnvWindow):
+class QuadcopterEnvWindowMARL3(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
 
-    def __init__(self, env: QuadcopterEnv3, window_name: str = "IsaacLab"):
+    def __init__(self, env: QuadcopterEnvMARL3, window_name: str = "IsaacLab"):
         """Initialize the window.
 
         Args:
@@ -54,22 +54,21 @@ class QuadcopterEnvWindow3(BaseEnvWindow):
 
 
 @configclass
-class QuadcopterEnvCfg3(DirectMARLEnvCfg):
+class QuadcopterEnvCfgMARL3(DirectMARLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 2
     #action_space = 4
     ### ------------------------------------------
-    possible_agents = ["T1", "T2", "T3", "T4", "M"]
-    action_spaces = {"T1": 1, "T2": 1, "T3": 1, "T4": 1, "M": 3}
+    possible_agents = ["f", "M1", "M2", "M3"]
+    action_spaces = {"f": 1, "M1": 1, "M2": 1, "M3": 1}
     ### ------------------------------------------
     #observation_space = 12
-    # observation_spaces = {"T1": 12, "T2": 12, "T3": 12, "T4": 12, "M": 12}
-    observation_spaces = {"T1": 15, "T2": 15, "T3": 15, "T4": 15, "M": 15}
+    observation_spaces = {"f": 15, "M1": 15, "M2": 15, "M3": 15}
     state_space = -1
     debug_vis = True
 
-    ui_window_class_type = QuadcopterEnvWindow3
+    ui_window_class_type = QuadcopterEnvWindowMARL3
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -141,10 +140,10 @@ class QuadcopterEnvCfg3(DirectMARLEnvCfg):
     # )
 
 
-class QuadcopterEnv3(DirectMARLEnv):
-    cfg: QuadcopterEnvCfg3
+class QuadcopterEnvMARL3(DirectMARLEnv):
+    cfg: QuadcopterEnvCfgMARL3
 
-    def __init__(self, cfg: QuadcopterEnvCfg3, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: QuadcopterEnvCfgMARL3, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Total thrust and moment applied to the base of the quadcopter
@@ -178,7 +177,7 @@ class QuadcopterEnv3(DirectMARLEnv):
 
         # wind drag
         self.wind_vel = torch.zeros(self.num_envs, 3, device=self.device)
-        self.w_coefficient = 0.01
+        self.w_coefficient = 0.05
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -200,23 +199,21 @@ class QuadcopterEnv3(DirectMARLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        act1 = actions["T1"].clone().clamp(-1.0, 1.0)
-        act2 = actions["T2"].clone().clamp(-1.0, 1.0)
-        act3 = actions["T3"].clone().clamp(-1.0, 1.0)
-        act4 = actions["T4"].clone().clamp(-1.0, 1.0)
-        thru = actions["M"].clone().clamp(-1.0, 1.0)
+        f = actions["f"].clone().clamp(-1.0, 1.0)
+        m1 = actions["M1"].clone().clamp(-1.0, 1.0)
+        m2 = actions["M2"].clone().clamp(-1.0, 1.0)
+        m3 = actions["M3"].clone().clamp(-1.0, 1.0)
 
-        #self._actions = actions.clone().clamp(-1.0, 1.0)
-        actTotal = (act1 + act2 + act3 + act4) / 4.0
-        actTotal += 1
         #print("ACTT")
         #print(actTotal.shape) # (32, 1)
         #print(torch.squeeze(actTotal).shape) # (32)
         #self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
         #self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
         self._thrust[:, 0, :2] = 0.0
-        self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (torch.squeeze(actTotal)) / 2.0
-        self._moment[:, 0, :] = self.cfg.moment_scale * torch.squeeze(thru)
+        self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (torch.squeeze(f+1)) / 2.0
+        self._moment[:, 0, 0] = self.cfg.moment_scale * torch.squeeze(m1)
+        self._moment[:, 0, 1] = self.cfg.moment_scale * torch.squeeze(m2)
+        self._moment[:, 0, 2] = self.cfg.moment_scale * torch.squeeze(m3)
         # print(self._thrust)
         #print(self._moment.shape)
 
@@ -226,6 +223,7 @@ class QuadcopterEnv3(DirectMARLEnv):
         self._thrust[:, 0, 0] += external_forces[:, 0]
         self._thrust[:, 0, 1] += external_forces[:, 1]
         self._thrust[:, 0, 2] += external_forces[:, 2]
+        # print(self._thrust)
 
     def _apply_action(self):
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
@@ -245,17 +243,10 @@ class QuadcopterEnv3(DirectMARLEnv):
             ],
             dim=-1,
         )
-        observations = {"T1": obs,
-                        "T2": obs,
-                        "T3": obs,
-                        "T4": obs,
-                        "M": obs,}
-        #print("OBS : ")
-        #print(observations)
-        # for quat in self._robot.data.root_link_state_w[:, 3:7]:
-        #     print(quat)
-        #
-        # torch.
+        observations = {"f": obs,
+                        "M1": obs,
+                        "M2": obs,
+                        "M3": obs,}
 
         return observations
 
@@ -276,7 +267,7 @@ class QuadcopterEnv3(DirectMARLEnv):
             # print("haha")
             # print(reward.shape)
 
-        return {"T1": reward, "T2": reward, "T3": reward, "T4": reward, "M": reward}
+        return {"f": reward, "M1": reward, "M2": reward, "M3": reward}
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
