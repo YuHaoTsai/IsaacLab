@@ -140,7 +140,7 @@ class QuadcopterEnvCfgMARL4(DirectMARLEnvCfg):
     # )
 
 
-class QuadcopterEnvMARL34(DirectMARLEnv):
+class QuadcopterEnvMARL4(DirectMARLEnv):
     cfg: QuadcopterEnvCfgMARL4
 
     def __init__(self, cfg: QuadcopterEnvCfgMARL4, render_mode: str | None = None, **kwargs):

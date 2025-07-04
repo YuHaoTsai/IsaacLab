@@ -18,6 +18,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.utils.math import quat_apply_inverse
 
 ##
 # Pre-defined configs
@@ -242,7 +243,8 @@ class QuadcopterEnvMARL(DirectMARLEnv):
         #print(self._moment.shape)
 
         # wind external forces
-        external_forces = self.w_coefficient * self.wind_vel
+        wind_vec_b = quat_apply_inverse(self._robot.data.root_link_state_w[:, 3:7], self.wind_vel)
+        external_forces = self.w_coefficient * (self._robot.data.root_com_lin_vel_b - wind_vec_b)
         # print(external_forces.shape) # (envs, 3)
         self._thrust[:, 0, 0] += external_forces[:, 0]
         self._thrust[:, 0, 1] += external_forces[:, 1]
