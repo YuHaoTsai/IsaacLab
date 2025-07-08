@@ -52,6 +52,18 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-Quadcopter-Direct-v0-v0-m",
+    entry_point=f"{__name__}.quadcopter_SARL_M:QuadcopterEnvSARLM",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.quadcopter_SARL_M:QuadcopterEnvCfgSARLM",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:QuadcopterPPORunnerCfg",
+        "skrl_mappo_cfg_entry_point": f"{agents.__name__}:skrl_mappo_cfg.yaml",
+    },
+)
+
+gym.register(
     id="Isaac-Quadcopter-Direct-v0-v1",
     entry_point=f"{__name__}.quadcopter_MARL:QuadcopterEnvMARL",
     disable_env_checker=True,

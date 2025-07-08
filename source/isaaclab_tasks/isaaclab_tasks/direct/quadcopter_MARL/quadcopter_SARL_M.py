@@ -35,7 +35,7 @@ from scipy.spatial.transform import Rotation as R
 from isaaclab.utils.math import matrix_from_quat
 
 
-class QuadcopterEnvWindowMARL(BaseEnvWindow):
+class QuadcopterEnvWindowSARLM(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
 
     def __init__(self, env: QuadcopterEnvMARL, window_name: str = "IsaacLab"):
@@ -56,7 +56,7 @@ class QuadcopterEnvWindowMARL(BaseEnvWindow):
 
 
 @configclass
-class QuadcopterEnvCfgMARL(DirectMARLEnvCfg):
+class QuadcopterEnvCfgSARLM(DirectMARLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 2
@@ -71,7 +71,7 @@ class QuadcopterEnvCfgMARL(DirectMARLEnvCfg):
     state_space = -1
     debug_vis = True
 
-    ui_window_class_type = QuadcopterEnvWindowMARL
+    ui_window_class_type = QuadcopterEnvWindowSARLM
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -143,10 +143,10 @@ class QuadcopterEnvCfgMARL(DirectMARLEnvCfg):
     # )
 
 
-class QuadcopterEnvMARL(DirectMARLEnv):
-    cfg: QuadcopterEnvCfgMARL
+class QuadcopterEnvSARLM(DirectMARLEnv):
+    cfg: QuadcopterEnvCfgSARLM
 
-    def __init__(self, cfg: QuadcopterEnvCfgMARL, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: QuadcopterEnvCfgSARLM, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Total thrust and moment applied to the base of the quadcopter
