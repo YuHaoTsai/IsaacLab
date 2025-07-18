@@ -223,7 +223,7 @@ class QuadcopterEnvMARL(DirectMARLEnv):
         self.J = np.diag([0.000023951, 0.000023951, 0.000032347])  # inertia matrix of quad, [kg m2]
 
         R = matrix_from_quat(self._robot.data.root_link_state_w[:, 3:7])
-        W = self._robot.data.root_link_state_w[:, 10:13]  # / self.W_lim
+        W = self._robot.data.root_link_state_w[:, 10:13]  # / self.W_lim ##need to change
         # print(R[3])
         b1, b2 = R @ self.e1.view(self.num_envs, 3, 1), R @ self.e2.view(self.num_envs, 3, 1)
 
