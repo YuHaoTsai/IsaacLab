@@ -141,11 +141,15 @@ class QuadcopterEnvSARL(DirectRLEnv):
         # wind drag
         self.wind_vel = torch.zeros(self.num_envs, 3, device=self.device)
         self.w_coefficient = 0.01
+        self.external_forces = torch.zeros(self.num_envs, 3, device=self.device)
 
         # last step position
         self.last_pos = torch.zeros(self.num_envs, 3, device=self.device)
         # sum of action
         self.total_actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
+        # last action
+        self.last_moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self.last_thrust = torch.zeros(self.num_envs, 1, device=self.device)
         # T1 ~ T4
         self.Forces = torch.zeros(self.num_envs, 4, device=self.device)
 
@@ -197,6 +201,8 @@ class QuadcopterEnvSARL(DirectRLEnv):
         # self.dragZ = []
         ###
 
+        self.dFactor = 0.0
+
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
@@ -214,22 +220,26 @@ class QuadcopterEnvSARL(DirectRLEnv):
         self.last_pos = self._robot.data.root_link_pos_w
 
         self._actions = actions.clone().clamp(-1.0, 1.0)
-        # self.total_actions[:, 0] += (0.2 * self._actions[:, 0])
-        # self.total_actions[:, 1] += (0.005 * self._actions[:, 1])
-        # self.total_actions[:, 2] += (0.005 * self._actions[:, 2])
-        # self.total_actions[:, 3] += (0.0005 * self._actions[:, 3])
+        # self.total_actions[:, 0] += self._actions[:, 0] * 0.5
+        # self.total_actions[:, 1] += self._actions[:, 1] * 0.1
+        # self.total_actions[:, 2] += self._actions[:, 2] * 0.1
+        # self.total_actions[:, 3] += self._actions[:, 3] * 0.05
 
-        self._thrust[:, 0, :2] = 0.0
+        self.last_thrust = self._thrust[:, 0, 2]
+        self.last_moment = self._moment[:, 0, :]
+        # print(self.last_moment[0])
+
+        # self._thrust[:, 0, :] = 0.0
         self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
         # self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self.total_actions[:, 0] + 1.0) / 2.0
         # self._thrust[:, 0, 2] = self._thrust[:, 0, 2].clone().clamp(0.02, 0.6)
 
         self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
-        # self._moment[:, 0, :] = self.cfg.moment_scale * self.total_actions[:, 1:]
+        # self._moment[:, 0, :] = self.total_actions[:, 1:]
         # self._moment[:, 0, :2] = self._moment[:, 0, :2].clone().clamp(-0.0075, 0.0075)
-        # self._moment[:, 0, 2] = self._moment[:, 0, 2].clone().clamp(-0.001, 0.001)
+        # self._moment[:, 0, 2] = self._moment[:, 0, 2].clone().clamp(-0.0018, 0.0018)
         # print("moment")
-        # print(self._moment)
+        # print(self._moment[0])
 
         # plot section                                                                                                      ***
         fM = torch.zeros(self.num_envs, 4, device=self.device)
@@ -258,40 +268,45 @@ class QuadcopterEnvSARL(DirectRLEnv):
         # self.a_vel_y.append(self._robot.data.root_link_state_w[0, 11].item())
         # self.a_vel_z.append(self._robot.data.root_link_state_w[0, 12].item())
         #
-        # self.T1.append(Forces[0, 0].item())
-        # self.T2.append(Forces[0, 1].item())
-        # self.T3.append(Forces[0, 2].item())
-        # self.T4.append(Forces[0, 3].item())
+        self.T1.append(self.Forces[0, 0].item())
+        self.T2.append(self.Forces[0, 1].item())
+        self.T3.append(self.Forces[0, 2].item())
+        self.T4.append(self.Forces[0, 3].item())
 
-        # wind vec generating
+        # wind vec generating                                                                                               ***
         # gauss wind
-        # self.wind_vel[:, :] = torch.zeros_like(self.wind_vel[:, :]).normal_(0.0, 2.0)
+        # self.wind_vel[:, :] = torch.zeros_like(self.wind_vel[:, :]).normal_(0.0, 1.0)
 
         # wind external forces
         wind_vec_b = quat_apply_inverse(self._robot.data.root_link_state_w[:, 3:7], self.wind_vel)
-        external_forces = -1.0 * self.w_coefficient * (self._robot.data.root_com_lin_vel_b - wind_vec_b)
+        self.external_forces = -1.0 * self.w_coefficient * (self._robot.data.root_com_lin_vel_b - wind_vec_b)
         # print(external_forces.shape) # (envs, 3)
-        self._thrust[:, 0, 0] += external_forces[:, 0]
-        self._thrust[:, 0, 1] += external_forces[:, 1]
-        self._thrust[:, 0, 2] += external_forces[:, 2]
+        # self._thrust[:, 0, 0] += external_forces[:, 0]
+        # self._thrust[:, 0, 1] += external_forces[:, 1]
+        # self._thrust[:, 0, 2] += external_forces[:, 2]
         # PLOT
         # self.dragX.append(external_forces[0, 0].item())
         # self.dragY.append(external_forces[0, 1].item())
         # self.dragZ.append(external_forces[0, 2].item())
         #
-        # self.step_count += 1                                                                                             # ***
+        self.step_count += 1                                                                                             # ***
         ###
 
     def _apply_action(self):
-        self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
+        # print(self.external_forces)
+        thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        thrust[:, 0, 0] = self._thrust[:, 0, 0] + self.external_forces[:, 0]
+        thrust[:, 0, 1] = self._thrust[:, 0, 1] + self.external_forces[:, 1]
+        thrust[:, 0, 2] = self._thrust[:, 0, 2] + self.external_forces[:, 2]
+        self._robot.set_external_force_and_torque(thrust, self._moment, body_ids=self._body_id)
 
     def _get_observations(self) -> dict:
         desired_pos_b, _ = subtract_frame_transforms(
             self._robot.data.root_link_state_w[:, :3], self._robot.data.root_link_state_w[:, 3:7], self._desired_pos_w
         )
 
-        wind_vec_b = quat_apply_inverse(self._robot.data.root_link_state_w[:, 3:7], self.wind_vel)
-        external_forces = -1.0 * self.w_coefficient * (self._robot.data.root_com_lin_vel_b - wind_vec_b)
+        # wind_vec_b = quat_apply_inverse(self._robot.data.root_link_state_w[:, 3:7], self.wind_vel)
+        # self.external_forces = -1.0 * self.w_coefficient * (self._robot.data.root_com_lin_vel_b - wind_vec_b)
 
         obs = torch.cat(
             [
@@ -300,7 +315,9 @@ class QuadcopterEnvSARL(DirectRLEnv):
                 self._robot.data.projected_gravity_b,
                 desired_pos_b,
                 # wind vel
-                external_forces,
+                self.external_forces,
+                # t1 ~ t4
+                # self.Forces,
             ],
             dim=-1,
         )
@@ -309,7 +326,7 @@ class QuadcopterEnvSARL(DirectRLEnv):
         # print("last")
         # print(self.last_pos[0, :])
         # print("current")
-        # print(self._robot.data.root_link_pos_w[0, :])
+        # print(self.external_forces[0])
 
         return observations
 
@@ -317,17 +334,18 @@ class QuadcopterEnvSARL(DirectRLEnv):
         lin_vel = torch.sum(torch.square(self._robot.data.root_com_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_com_ang_vel_b), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_link_pos_w, dim=1)
-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+        distance_to_goal_mapped = 1 - torch.tanh(self.dFactor * distance_to_goal)
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
-            "encouraging": self.cfg.encouraging_scale * (torch.linalg.norm(self._desired_pos_w - self.last_pos, dim=1) - distance_to_goal),
-            "exceeding_thrust_limit1": torch.tanh(4 * (10 * self.Forces[:, 0] + 0.5)) - 0.99 ,
-            "exceeding_thrust_limit2": torch.tanh(4 * (10 * self.Forces[:, 1] + 0.5)) - 0.99 ,
-            "exceeding_thrust_limit3": torch.tanh(4 * (10 * self.Forces[:, 2] + 0.5)) - 0.99 ,
-            "exceeding_thrust_limit4": torch.tanh(4 * (10 * self.Forces[:, 3] + 0.5)) - 0.99 ,
+            "encouraging": self.cfg.encouraging_scale * (torch.linalg.norm(self._desired_pos_w - self.last_pos, dim=1) - distance_to_goal) * self.step_dt,
+            "exceeding_thrust_limit1": (torch.tanh(4 * (10 * self.Forces[:, 0] + 0.5)) - 0.99) * self.step_dt * 10,
+            "exceeding_thrust_limit2": (torch.tanh(4 * (10 * self.Forces[:, 1] + 0.5)) - 0.99) * self.step_dt * 10,
+            "exceeding_thrust_limit3": (torch.tanh(4 * (10 * self.Forces[:, 2] + 0.5)) - 0.99) * self.step_dt * 10,
+            "exceeding_thrust_limit4": (torch.tanh(4 * (10 * self.Forces[:, 3] + 0.5)) - 0.99) * self.step_dt * 10,
         }
+        # print(self.step_dt)
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
         for key, value in rewards.items():
@@ -370,16 +388,18 @@ class QuadcopterEnvSARL(DirectRLEnv):
 
         # sum of action
         self.total_actions[env_ids] = 0.0
+        self.total_actions[env_ids, 0] = 0.2
 
         # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-3.0, 3.0)
+        self.dFactor = 1.25
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
 
         # for testing scenario                                                                                              ***
         # scenario 1.
         # self._desired_pos_w[env_ids, 0] = 0.0
-        # self._desired_pos_w[env_ids, 1] = 5.0
+        # self._desired_pos_w[env_ids, 1] = 3.0
         # self._desired_pos_w[env_ids, 2] = 1.0
         ###
         # Reset robot state
@@ -399,17 +419,18 @@ class QuadcopterEnvSARL(DirectRLEnv):
 
         # reset wind velocity                                                                                               ***
         # 1. constant wind, same in all envs
-        self.wind_vel[env_ids, 0] = 0.0  # m/s
+        self.wind_vel[env_ids, 0] = 2.0  # m/s
         self.wind_vel[env_ids, 1] = 0.0
         self.wind_vel[env_ids, 2] = 0.0
         # 2. constant wind, varying in each env (in gauss distribution)
         # self.wind_vel[env_ids, :] = torch.zeros_like(self.wind_vel[env_ids, :]).normal_(0.0, 4.0)
+        self.external_forces[env_ids, :] = 0.0
 
         self.last_pos[env_ids, :] = 0.0                                                                                     # ***
         self.Forces[env_ids, :] = 0.0
 
         # for plotting                                                                                                      ***
-        # if torch.any(env_ids == 0) :
+        if torch.any(env_ids == 0) :
         #     plt.plot(range(self.step_count), self.thrust)
         #     pic_name = "thrust:{:05d}.jpg".format(self.pic_count_thrust)
         #     plt.savefig(pic_name)
@@ -485,27 +506,27 @@ class QuadcopterEnvSARL(DirectRLEnv):
             # self.a_vel_y = []
             # self.a_vel_z = []
             #
-            # plt.plot(range(self.step_count), self.T1)
-            # pic_name = "T1:{:05d}.jpg".format(self.pic_count_T)
-            # plt.savefig(pic_name)
-            # plt.close()
-            # plt.plot(range(self.step_count), self.T2)
-            # pic_name = "T2:{:05d}.jpg".format(self.pic_count_T)
-            # plt.savefig(pic_name)
-            # plt.close()
-            # plt.plot(range(self.step_count), self.T3)
-            # pic_name = "T3:{:05d}.jpg".format(self.pic_count_T)
-            # plt.savefig(pic_name)
-            # plt.close()
-            # plt.plot(range(self.step_count), self.T4)
-            # pic_name = "T4:{:05d}.jpg".format(self.pic_count_T)
-            # plt.savefig(pic_name)
-            # plt.close()
-            # self.pic_count_T += 1
-            # self.T1 = []
-            # self.T2 = []
-            # self.T3 = []
-            # self.T4 = []
+            plt.plot(range(self.step_count), self.T1)
+            pic_name = "T1:{:05d}.jpg".format(self.pic_count_T)
+            plt.savefig(pic_name)
+            plt.close()
+            plt.plot(range(self.step_count), self.T2)
+            pic_name = "T2:{:05d}.jpg".format(self.pic_count_T)
+            plt.savefig(pic_name)
+            plt.close()
+            plt.plot(range(self.step_count), self.T3)
+            pic_name = "T3:{:05d}.jpg".format(self.pic_count_T)
+            plt.savefig(pic_name)
+            plt.close()
+            plt.plot(range(self.step_count), self.T4)
+            pic_name = "T4:{:05d}.jpg".format(self.pic_count_T)
+            plt.savefig(pic_name)
+            plt.close()
+            self.pic_count_T += 1
+            self.T1 = []
+            self.T2 = []
+            self.T3 = []
+            self.T4 = []
             #
             # plt.plot(range(self.step_count), self.dragX)
             # pic_name = "drag x:{:05d}.jpg".format(self.pic_count_drag)
@@ -524,7 +545,7 @@ class QuadcopterEnvSARL(DirectRLEnv):
             # self.dragY = []
             # self.dragZ = []
             #                                                                                                               ***
-            # self.step_count = 0
+            self.step_count = 0
 
         ###
 
