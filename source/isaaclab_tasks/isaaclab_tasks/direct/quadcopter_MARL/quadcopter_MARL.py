@@ -406,6 +406,8 @@ class QuadcopterEnvMARL(DirectMARLEnv):
             self._robot.data.root_link_state_w[:, :3], self._robot.data.root_link_state_w[:, 3:7], self._desired_pos_w
         )
 
+        noise = torch.zeros_like(self.external_forces).normal_(0.0, 0.005)
+
         obs1 = torch.cat(
             [
                 self._robot.data.root_com_lin_vel_b,
@@ -416,7 +418,7 @@ class QuadcopterEnvMARL(DirectMARLEnv):
                 self.o_b1.squeeze(dim=1),
                 self.o_b2.squeeze(dim=1),
                 # wind vel
-                self.external_forces,
+                self.external_forces + noise,
             ],
             dim=-1,
         )
@@ -430,7 +432,7 @@ class QuadcopterEnvMARL(DirectMARLEnv):
                 # T1~T4
                 # self.Forces,
                 # wind vel
-                self.external_forces,
+                self.external_forces + noise,
             ],
             dim=-1,
         )
@@ -443,7 +445,7 @@ class QuadcopterEnvMARL(DirectMARLEnv):
         lin_vel = torch.sum(torch.square(self._robot.data.root_com_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_com_ang_vel_b), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_link_pos_w, dim=1)
-        distance_to_goal_mapped = 1 - torch.tanh(self.dFactor * distance_to_goal)
+        distance_to_goal_mapped = 1 - torch.tanh(self.dFactor * (distance_to_goal - 2))
         thrust_change = torch.square(self._thrust[:, 0, 2] - self.last_thrust)
         moment_change = torch.sum(torch.square(self._moment.squeeze() - self.last_moment), dim=1)
 
@@ -547,8 +549,8 @@ class QuadcopterEnvMARL(DirectMARLEnv):
         #self._actions[env_ids] = 0.0
 
         # Sample new commands
-        self.dFactor = 0.85  # 1.25, 0.85, 0.5, ... <=> (2, 3, 5, ...)
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-3.0, 3.0)
+        self.dFactor = 0.75  # 1.25, 0.85, 0.5, ... <=> (2, 3, 5, ...)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-5.0, 5.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
         # Reset robot state
@@ -574,6 +576,17 @@ class QuadcopterEnvMARL(DirectMARLEnv):
         self.check[env_ids] = 0.0
         self.check_count[env_ids] = 0.0
         self.bonus[env_ids] = 0.0
+
+        # for testing scenario                                                                                              ***
+        # scenario 1.
+        # goal point
+        # self._desired_pos_w[env_ids, 0] = 0.0
+        # self._desired_pos_w[env_ids, 1] = 3.0
+        # self._desired_pos_w[env_ids, 2] = 1.0
+        # starting point
+        # default_root_state[:, 0] = 0.0
+        # default_root_state[:, 1] = 0.0
+        # default_root_state[:, 2] = 1.0
 
         # for plotting                                                                                                      ***
         # if torch.any(env_ids == 0):
