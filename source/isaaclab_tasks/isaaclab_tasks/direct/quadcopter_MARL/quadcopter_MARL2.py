@@ -18,6 +18,8 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.utils.math import quat_apply_inverse
+from matplotlib import pyplot as plt
 
 ##
 # Pre-defined configs
@@ -29,10 +31,10 @@ from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
 import numpy as np
+import pandas as pd
 from math import pi
 from scipy.spatial.transform import Rotation as R
 from isaaclab.utils.math import matrix_from_quat
-
 
 class QuadcopterEnvWindowMARL2(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
@@ -66,7 +68,7 @@ class QuadcopterEnvCfgMARL2(DirectMARLEnvCfg):
     ### ------------------------------------------
     #observation_space = 12
     # observation_spaces = {"Translation": 18, "Yaw": 12}
-    observation_spaces = {"Translation": 18, "Yaw": 12, "wind": 3}
+    observation_spaces = {"Translation": 18, "Yaw": 6, "wind": 9}
     state_space = -1
     debug_vis = True
 
@@ -111,6 +113,7 @@ class QuadcopterEnvCfgMARL2(DirectMARLEnvCfg):
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 20.0
+    encouraging_scale = 0.8
 
     # obstacles
     # Create separate groups called "Origin1", "Origin2", "Origin3"
@@ -174,6 +177,10 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
                 "lin_vel",
                 "ang_vel",
                 "distance_to_goal",
+                "encouraging",
+                "thrust_smoothing",
+                "moment_smoothing",
+                "goal",
             ]
         }
         # Get specific body indices
@@ -188,6 +195,83 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
         # wind drag
         self.wind_vel = torch.zeros(self.num_envs, 3, device=self.device)
         self.w_coefficient = 0.01
+        self.external_forces = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # last step position
+        self.last_pos = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # last action
+        self.last_moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self.last_thrust = torch.zeros(self.num_envs, 1, device=self.device)
+        self.last_forces = torch.zeros(self.num_envs, 4, device=self.device)
+
+        # T1 ~ T4
+        self.Forces = torch.zeros(self.num_envs, 4, device=self.device)
+
+        self.d = 0.05
+        self.c_tf = 0.006
+        self.forces_to_fM = [[1.0, 1.0, 1.0, 1.0],
+                             [0.0, -self.d, 0.0, self.d],
+                             [self.d, 0.0, -self.d, 0.0],
+                             [-self.c_tf, self.c_tf, -self.c_tf, self.c_tf]]
+
+        self.M = torch.tensor(self.forces_to_fM, device=self.device)
+        self.fM_to_forces = torch.linalg.inv(self.M)
+
+        # distance reward
+        self.dFactor = 0.0
+
+        # goal bonus
+        self.check = torch.zeros(self.num_envs, 1, device=self.device)
+        self.check_count = torch.zeros(self.num_envs, device=self.device)
+        self.bonus = torch.zeros(self.num_envs, 1, device=self.device)
+
+        # for plotting
+        self.step_count = 0
+        #
+        self.thrust = []
+
+        self.moment_x = []
+        self.moment_y = []
+        self.moment_z = []
+        #
+        # self.pos_x = []
+        # self.pos_y = []
+        # self.pos_z = []
+        #
+        # self.l_vel_x = []
+        # self.l_vel_y = []
+        # self.l_vel_z = []
+        #
+        # self.a_vel_x = []
+        # self.a_vel_y = []
+        # self.a_vel_z = []
+        #
+        self.pic_count_thrust = 0
+        self.pic_count_moment = 0
+        # self.pic_count_pos = 0
+        # self.pic_count_l_vel = 0
+        # self.pic_count_a_vel = 0
+        self.pic_count_T = 0
+        self.pic_count_drag = 0
+        self.change_count = 0
+        #
+        self.T1 = []
+        self.T2 = []
+        self.T3 = []
+        self.T4 = []
+        #
+        self.dragX = []
+        self.dragY = []
+        self.dragZ = []
+        self.dragX_n = []
+        self.dragY_n = []
+        self.dragZ_n = []
+
+        self.th_change = []
+        self.mo_change = []
+        self.T_change = []
+        ###
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -209,6 +293,8 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        self.last_pos = self._robot.data.root_link_pos_w
+
         act1 = actions["Translation"].clone().clamp(-1.0, 1.0)
         act2 = actions["Yaw"].clone().clamp(-1.0, 1.0)
         act3 = actions["wind"].clone().clamp(-1.0, 1.0)
@@ -234,29 +320,93 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
         self.M2 = torch.squeeze(torch.matmul(self.o_b2, self.tau.view(self.num_envs, 3, 1))) - 0.000032347 * W[:, 2] * W[:, 0]  # M2
         #self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
         #self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
+
+        self.last_thrust = 0.0
+        self.last_moment = 0.0
+        self.last_forces = 0.0
+        self.last_thrust += self._thrust[:, 0, 2]
+        self.last_moment += self._moment[:, 0, :]
+        self.last_forces += self.Forces
+
         self._thrust[:, 0, :2] = 0.0
         self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self.f + 1.0) / 2.0 + (0.1 * act3[:, 0])
-        self._moment[:, 0, 0] = self.cfg.moment_scale * torch.squeeze(self.M1) + (0.1 * act3[:, 1])
-        self._moment[:, 0, 1] = self.cfg.moment_scale * torch.squeeze(self.M2) + (0.1 * act3[:, 2])
-        self._moment[:, 0, 2] = self.cfg.moment_scale * torch.squeeze(self.M3) + (0.1 * act3[:, 3])
+        self._moment[:, 0, 0] = self.cfg.moment_scale * torch.squeeze(self.M1) + (0.01 * act3[:, 1])
+        self._moment[:, 0, 1] = self.cfg.moment_scale * torch.squeeze(self.M2) + (0.01 * act3[:, 2])
+        self._moment[:, 0, 2] = self.cfg.moment_scale * torch.squeeze(self.M3) + (0.01 * act3[:, 3])
         # print(self._thrust)
         #print(self._moment.shape)
 
+        fM = torch.zeros(self.num_envs, 4, device=self.device)
+        fM[:, 0] = self._thrust[:, 0, 2]
+        fM[:, 1:4] = self._moment[:, 0, :]
+        for env in range(self.num_envs):
+            self.Forces[env, :] = torch.matmul(self.fM_to_forces, fM[env, :])
+
+        thrust_change = self._thrust[:, 0, 2] - self.last_thrust
+        moment_change = self._moment.squeeze() - self.last_moment
+        forces_change = self.Forces - self.last_forces
+
+        # for plotting
+        # self.thrust.append(self._thrust[0, 0, 2].item())
+        #
+        # self.moment_x.append(self._moment[0, 0, 0].item())
+        # self.moment_y.append(self._moment[0, 0, 1].item())
+        # self.moment_z.append(self._moment[0, 0, 2].item())
+        #
+        # self.pos_x.append(self._robot.data.root_link_pos_w[0, 0].item())
+        # self.pos_y.append(self._robot.data.root_link_pos_w[0, 1].item())
+        # self.pos_z.append(self._robot.data.root_link_pos_w[0, 2].item())
+        #
+        # self.l_vel_x.append(self._robot.data.root_link_state_w[0, 7].item())
+        # self.l_vel_y.append(self._robot.data.root_link_state_w[0, 8].item())
+        # self.l_vel_z.append(self._robot.data.root_link_state_w[0, 9].item())
+        #
+        # self.a_vel_x.append(self._robot.data.root_link_state_w[0, 10].item())
+        # self.a_vel_y.append(self._robot.data.root_link_state_w[0, 11].item())
+        # self.a_vel_z.append(self._robot.data.root_link_state_w[0, 12].item())
+        #
+        # self.T1.append(self.Forces[0, 0].item())
+        # self.T2.append(self.Forces[0, 1].item())
+        # self.T3.append(self.Forces[0, 2].item())
+        # self.T4.append(self.Forces[0, 3].item())
+        #
+        # self.th_change.append(thrust_change[0].item())
+        # self.mo_change.append(moment_change[0, 2].item())
+        # self.T_change.append(forces_change[0, 2].item())
+        # print("now")
+        # print(self._thrust[0, 0, 2])
+        # print(self.last_thrust[0])
+
+        # wind vec generating                                                                                               ***
+        # gauss wind
+        # self.wind_vel[:, :2] = torch.zeros_like(self.wind_vel[:, :2]).normal_(1.0, 0.01)
+        # self.wind_vel[:, 2] = 0.0
+
         # wind external forces
-        external_forces = self.w_coefficient * self.wind_vel
-        # print(external_forces.shape) # (envs, 3)
-        self._thrust[:, 0, 0] += external_forces[:, 0]
-        self._thrust[:, 0, 1] += external_forces[:, 1]
-        self._thrust[:, 0, 2] += external_forces[:, 2]
-        # print(self._thrust)
+        wind_vec_b = quat_apply_inverse(self._robot.data.root_link_state_w[:, 3:7], self.wind_vel)
+        self.external_forces = -1.0 * self.w_coefficient * (self._robot.data.root_com_lin_vel_b - wind_vec_b)
+
+        # PLOT
+        self.dragX.append(self.external_forces[0, 0].item())
+        self.dragY.append(self.external_forces[0, 1].item())
+        self.dragZ.append(self.external_forces[0, 2].item())
+        #
+        self.step_count += 1  # ***
+        ###
 
     def _apply_action(self):
+        thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        thrust[:, 0, 0] = self._thrust[:, 0, 0] + self.external_forces[:, 0]
+        thrust[:, 0, 1] = self._thrust[:, 0, 1] + self.external_forces[:, 1]
+        thrust[:, 0, 2] = self._thrust[:, 0, 2] + self.external_forces[:, 2]
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
-    def _get_observations(self) -> dict:
+    def _get_observations(self) -> dict[str, torch.Tensor]:
         desired_pos_b, _ = subtract_frame_transforms(
             self._robot.data.root_link_state_w[:, :3], self._robot.data.root_link_state_w[:, 3:7], self._desired_pos_w
         )
+
+        noise = torch.zeros_like(self.external_forces).normal_(0.0, 0.005)
 
         obs1 = torch.cat(
             [
@@ -264,16 +414,15 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
                 self._robot.data.root_com_ang_vel_b,
                 self._robot.data.projected_gravity_b,
                 desired_pos_b,
-                self.o_b1.squeeze(),
-                self.o_b2.squeeze(),
+                # rotational matrix
+                self.o_b1.squeeze(dim=1),
+                self.o_b2.squeeze(dim=1),
             ],
             dim=-1,
         )
 
         obs2 = torch.cat(
             [
-                self._robot.data.root_com_lin_vel_b,
-                self._robot.data.root_com_ang_vel_b,
                 self._robot.data.projected_gravity_b,
                 desired_pos_b,
             ],
@@ -282,14 +431,22 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
 
         obs3 = torch.cat(
             [
+                self._robot.data.projected_gravity_b,
+                desired_pos_b,
                 # wind vel
-                self.wind_vel,
+                self.external_forces  # + noise,
             ],
             dim=-1,
         )
+
         observations = {"Translation": obs1,
                         "Yaw": obs2,
-                        "wind": obs3}
+                        "wind": obs3, }
+
+        exf_n = self.external_forces + noise
+        self.dragX_n.append(exf_n[0, 0].item())
+        self.dragY_n.append(exf_n[0, 1].item())
+        self.dragZ_n.append(exf_n[0, 2].item())
 
         return observations
 
@@ -297,27 +454,65 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
         lin_vel = torch.sum(torch.square(self._robot.data.root_com_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_com_ang_vel_b), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_link_pos_w, dim=1)
-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
-        rewards = {
+        distance_to_goal_mapped = 1 - torch.tanh(self.dFactor * (distance_to_goal - 0.0))
+        thrust_change = torch.square(self._thrust[:, 0, 2] - self.last_thrust)
+        moment_change = torch.sum(torch.square(self._moment.squeeze() - self.last_moment), dim=1)
+
+        rewards1 = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "encouraging": self.cfg.encouraging_scale * (torch.linalg.norm(self._desired_pos_w - self.last_pos, dim=1) - distance_to_goal) * self.step_dt,
+            "thrust_smoothing": -1.5 * thrust_change * self.step_dt,
+            "goal": self.bonus,
         }
-        reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
-        # Logging
-        for key, value in rewards.items():
-            self._episode_sums[key] += value
-            # print("haha")
-            # print(reward.shape)
+        reward1 = torch.sum(torch.stack(list(rewards1.values())), dim=0)
 
-        return {"Translation": reward, "Yaw": reward, "wind": reward}
+        rewards2 = {
+            "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "encouraging": self.cfg.encouraging_scale * (torch.linalg.norm(self._desired_pos_w - self.last_pos, dim=1) - distance_to_goal) * self.step_dt,
+            "moment_smoothing": -1.5 * moment_change * self.step_dt,
+            "goal": self.bonus,
+        }
+        reward2 = torch.sum(torch.stack(list(rewards2.values())), dim=0)
+
+        rewards3 = {
+            "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
+            "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
+            "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "encouraging": self.cfg.encouraging_scale * (torch.linalg.norm(self._desired_pos_w - self.last_pos, dim=1) - distance_to_goal) * self.step_dt,
+            "thrust_smoothing": -1.5 * thrust_change * self.step_dt,
+            "moment_smoothing": -1.5 * moment_change * self.step_dt,
+            "goal": self.bonus,
+        }
+        reward3 = torch.sum(torch.stack(list(rewards3.values())), dim=0)
+
+        # Logging
+        for key, value in rewards1.items():
+            self._episode_sums[key] += value
+        for key, value in rewards2.items():
+            self._episode_sums[key] += value
+        for key, value in rewards3.items():
+            self._episode_sums[key] += value
+
+        return {"Translation": reward1, "Yaw": reward2, "wind": (0.1 * reward3)}
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = torch.logical_or(
-            self._robot.data.root_link_pos_w[:, 2] < 0.05, self._robot.data.root_link_pos_w[:, 2] > 2.5
+            self._robot.data.root_link_pos_w[:, 2] < 0.05, self._robot.data.root_link_pos_w[:, 2] > 3.0,
         )
-        # print(self.max_episode_length)
+        died = torch.logical_or(died, self.Forces[:, 0] < 0.0)
+        died = torch.logical_or(died, self.Forces[:, 1] < 0.0)
+        died = torch.logical_or(died, self.Forces[:, 2] < 0.0)
+        died = torch.logical_or(died, self.Forces[:, 3] < 0.0)
+
+        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_link_pos_w, dim=1)
+        self.check = torch.where(distance_to_goal < 1.0, 1.0, 0.0)
+        self.check_count += self.check
+        self.bonus = torch.where(self.check_count > 400.0, 100, 0.0)
+        died = torch.logical_or(died, self.check_count > 401.0)
+
         ###
         terminated = {agent: died for agent in self.cfg.possible_agents}
         time_outs = {agent: time_out for agent in self.cfg.possible_agents}
@@ -356,7 +551,8 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
         #self._actions[env_ids] = 0.0
 
         # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-3.0, 3.0)
+        self.dFactor = 1.25  # 1.25, 0.85, 0.5, ... <=> (2, 3, 5, ...)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
         # Reset robot state
@@ -370,9 +566,173 @@ class QuadcopterEnvMARL2(DirectMARLEnv):
 
         # reset wind velocity
         # 1. constant wind., same in all envs
-        self.wind_vel[env_ids, 0] = 5.0 # m/s
-        self.wind_vel[env_ids, 1] = 0.0
+        self.wind_vel[env_ids, 0] = 0.0 # m/s
+        self.wind_vel[env_ids, 1] = 1.0
         self.wind_vel[env_ids, 2] = 0.0
+        self.external_forces[env_ids, :] = 0.0
+
+        self.last_pos[env_ids, :] = 0.0
+        self.Forces[env_ids, :] = 0.0  # 8/05
+
+        # reset goal bonus
+        self.check[env_ids] = 0.0
+        self.check_count[env_ids] = 0.0
+        self.bonus[env_ids] = 0.0
+
+        # for testing scenario                                                                                              ***
+        # scenario 1.
+        # goal point
+        # self._desired_pos_w[env_ids, 0] = 0.0
+        # self._desired_pos_w[env_ids, 1] = 3.0
+        # self._desired_pos_w[env_ids, 2] = 1.0
+        # starting point
+        # default_root_state[:, 0] = 0.0
+        # default_root_state[:, 1] = 0.0
+        # default_root_state[:, 2] = 1.0
+
+        # for plotting                                                                                                      ***
+        # if torch.any(env_ids == 0):
+            #     plt.plot(range(self.step_count), self.thrust)
+            #     pic_name = "thrust:{:05d}.jpg".format(self.pic_count_thrust)
+            #     plt.savefig(pic_name)
+            #     plt.close()
+            #     self.pic_count_thrust += 1
+            #     self.thrust = []
+            #
+            #     plt.plot(range(self.step_count), self.moment_x)
+            #     pic_name = "moment_x:{:05d}.jpg".format(self.pic_count_moment)
+            #     plt.savefig(pic_name)
+            #     plt.close()
+            #     plt.plot(range(self.step_count), self.moment_y)
+            #     pic_name = "moment_y:{:05d}.jpg".format(self.pic_count_moment)
+            #     plt.savefig(pic_name)
+            #     plt.close()
+            #     plt.plot(range(self.step_count), self.moment_z)
+            #     pic_name = "moment_z:{:05d}.jpg".format(self.pic_count_moment)
+            #     plt.savefig(pic_name)
+            #     plt.close()
+            #     self.pic_count_moment += 1
+            #     self.moment_x = []
+            #     self.moment_y = []
+            #     self.moment_z = []
+            #
+            # plt.plot(range(self.step_count), self.pos_x)
+            # pic_name = "pos_x:{:05d}.jpg".format(self.pic_count_pos)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.pos_y)
+            # pic_name = "pos_y:{:05d}.jpg".format(self.pic_count_pos)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.pos_z)
+            # pic_name = "pos_z:{:05d}.jpg".format(self.pic_count_pos)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # self.pic_count_pos += 1
+            # self.pos_x = []
+            # self.pos_y = []
+            # self.pos_z = []
+            #
+            # plt.plot(range(self.step_count), self.l_vel_x)
+            # pic_name = "linear vel x:{:05d}.jpg".format(self.pic_count_l_vel)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.l_vel_y)
+            # pic_name = "linear vel y:{:05d}.jpg".format(self.pic_count_l_vel)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.l_vel_z)
+            # pic_name = "linear vel z:{:05d}.jpg".format(self.pic_count_l_vel)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # self.pic_count_l_vel += 1
+            # self.l_vel_x = []
+            # self.l_vel_y = []
+            # self.l_vel_z = []
+            #
+            # plt.plot(range(self.step_count), self.a_vel_x)
+            # pic_name = "angular vel x:{:05d}.jpg".format(self.pic_count_a_vel)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.a_vel_y)
+            # pic_name = "angular vel y:{:05d}.jpg".format(self.pic_count_a_vel)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.a_vel_z)
+            # pic_name = "angular vel z:{:05d}.jpg".format(self.pic_count_a_vel)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # self.pic_count_a_vel += 1
+            # self.a_vel_x = []
+            # self.a_vel_y = []
+            # self.a_vel_z = []
+            #
+            # plt.plot(range(self.step_count), self.T1)
+            # pic_name = "T1:{:05d}.jpg".format(self.pic_count_T)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.T2)
+            # pic_name = "T2:{:05d}.jpg".format(self.pic_count_T)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.T3)
+            # pic_name = "T3:{:05d}.jpg".format(self.pic_count_T)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.T4)
+            # pic_name = "T4:{:05d}.jpg".format(self.pic_count_T)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # self.pic_count_T += 1
+            # self.T1 = []
+            # self.T2 = []
+            # self.T3 = []
+            # self.T4 = []
+            #
+            # plt.plot(range(self.step_count), self.dragX)
+            # pic_name = "drag x:{:05d}.jpg".format(self.pic_count_drag)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.dragY)
+            # pic_name = "drag y:{:05d}.jpg".format(self.pic_count_drag)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.dragZ)
+            # pic_name = "drag z:{:05d}.jpg".format(self.pic_count_drag)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # data_drag = pd.DataFrame(
+            #     {'X': self.dragX, 'Y': self.dragY, 'Z': self.dragZ, 'X_n': self.dragX_n, 'Y_n': self.dragY_n,
+            #      'Z_n': self.dragZ_n, 't': range(self.step_count)})
+            # data_drag.to_csv("wind_drag:{:05d}.csv".format(self.pic_count_drag), index=False)
+            #
+            # self.pic_count_drag += 1
+            #
+            # self.dragX = []
+            # self.dragY = []
+            # self.dragZ = []
+            # self.dragX_n = []
+            # self.dragY_n = []
+            # self.dragZ_n = []
+
+            # plt.plot(range(self.step_count), self.th_change)
+            # pic_name = "th change:{:05d}.jpg".format(self.change_count)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.mo_change)
+            # pic_name = "mo change:{:05d}.jpg".format(self.change_count)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # plt.plot(range(self.step_count), self.T_change, marker='o')
+            # pic_name = "T change:{:05d}.jpg".format(self.change_count)
+            # plt.savefig(pic_name)
+            # plt.close()
+            # self.change_count += 1
+            # self.th_change = []
+            # self.mo_change = []
+            # self.T_change = []
+            ###                                                                                                               ***
+            # self.step_count = 0
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome

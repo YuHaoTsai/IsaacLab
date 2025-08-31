@@ -30,6 +30,8 @@ from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
 import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
 from math import pi
 from scipy.spatial.transform import Rotation as R
 from isaaclab.utils.math import matrix_from_quat
@@ -62,12 +64,12 @@ class QuadcopterEnvCfgSARLM(DirectMARLEnvCfg):
     decimation = 2
     #action_space = 4
     ### ------------------------------------------
-    possible_agents = ["Translation", "Yaw"]
-    action_spaces = {"Translation": 4, "Yaw": 1}
+    possible_agents = ["main", "wind"]
+    action_spaces = {"main": 4, "wind": 4}
     ### ------------------------------------------
     #observation_space = 12
     # observation_spaces = {"Translation": 18, "Yaw": 12}
-    observation_spaces = {"Translation": 21, "Yaw": 15}
+    observation_spaces = {"main": 18, "wind": 9}
     state_space = -1
     debug_vis = True
 
@@ -112,6 +114,7 @@ class QuadcopterEnvCfgSARLM(DirectMARLEnvCfg):
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 20.0
+    encouraging_scale = 0.8
 
     # obstacles
     # Create separate groups called "Origin1", "Origin2", "Origin3"
@@ -175,6 +178,14 @@ class QuadcopterEnvSARLM(DirectMARLEnv):
                 "lin_vel",
                 "ang_vel",
                 "distance_to_goal",
+                "encouraging",
+                # "exceeding_thrust_limit1",
+                # "exceeding_thrust_limit2",
+                # "exceeding_thrust_limit3",
+                # "exceeding_thrust_limit4",
+                "thrust_smoothing",
+                "moment_smoothing",
+                "goal",
             ]
         }
         # Get specific body indices
@@ -189,6 +200,83 @@ class QuadcopterEnvSARLM(DirectMARLEnv):
         # wind drag
         self.wind_vel = torch.zeros(self.num_envs, 3, device=self.device)
         self.w_coefficient = 0.01
+        self.external_forces = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # last step position
+        self.last_pos = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # last action
+        self.last_moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self.last_thrust = torch.zeros(self.num_envs, 1, device=self.device)
+        self.last_forces = torch.zeros(self.num_envs, 4, device=self.device)
+
+        # T1 ~ T4
+        self.Forces = torch.zeros(self.num_envs, 4, device=self.device)
+
+        self.d = 0.05
+        self.c_tf = 0.006
+        self.forces_to_fM = [[1.0, 1.0, 1.0, 1.0],
+                             [0.0, -self.d, 0.0, self.d],
+                             [self.d, 0.0, -self.d, 0.0],
+                             [-self.c_tf, self.c_tf, -self.c_tf, self.c_tf]]
+
+        self.M = torch.tensor(self.forces_to_fM, device=self.device)
+        self.fM_to_forces = torch.linalg.inv(self.M)
+
+        # distance reward
+        self.dFactor = 0.0
+
+        # goal bonus
+        self.check = torch.zeros(self.num_envs, 1, device=self.device)
+        self.check_count = torch.zeros(self.num_envs, device=self.device)
+        self.bonus = torch.zeros(self.num_envs, 1, device=self.device)
+
+        # for plotting
+        self.step_count = 0
+        #
+        self.thrust = []
+
+        self.moment_x = []
+        self.moment_y = []
+        self.moment_z = []
+        #
+        # self.pos_x = []
+        # self.pos_y = []
+        # self.pos_z = []
+        #
+        # self.l_vel_x = []
+        # self.l_vel_y = []
+        # self.l_vel_z = []
+        #
+        # self.a_vel_x = []
+        # self.a_vel_y = []
+        # self.a_vel_z = []
+        #
+        self.pic_count_thrust = 0
+        self.pic_count_moment = 0
+        # self.pic_count_pos = 0
+        # self.pic_count_l_vel = 0
+        # self.pic_count_a_vel = 0
+        self.pic_count_T = 0
+        self.pic_count_drag = 0
+        self.change_count = 0
+        #
+        self.T1 = []
+        self.T2 = []
+        self.T3 = []
+        self.T4 = []
+        #
+        self.dragX = []
+        self.dragY = []
+        self.dragZ = []
+        self.dragX_n = []
+        self.dragY_n = []
+        self.dragZ_n = []
+
+        self.th_change = []
+        self.mo_change = []
+        self.T_change = []
+        ###
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -210,12 +298,14 @@ class QuadcopterEnvSARLM(DirectMARLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        act1 = actions["Translation"].clone().clamp(-1.0, 1.0)
-        act2 = actions["Yaw"].clone().clamp(-1.0, 1.0)
+        self.last_pos = self._robot.data.root_link_pos_w
 
-        self.f = act1[:, 0]  # [N]
-        self.tau = 0.1 * act1[:, 1:]
-        self.M3 = 0.2 * act2  # [Nm]
+        act1 = actions["main"].clone().clamp(-1.0, 1.0)
+        act2 = actions["wind"].clone().clamp(-1.0, 1.0)
+
+        # self.f = act1[:, 0]  # [N]
+        # self.tau = 0.1 * act1[:, 1:]
+        # self.M3 = 0.2 * act2  # [Nm]
 
         self.e1[:, :] = torch.tensor([1.0, 0.0, 0.0], device=self.device)
         self.e2[:, :] = torch.tensor([0.0, 1.0, 0.0], device=self.device)
@@ -223,41 +313,59 @@ class QuadcopterEnvSARLM(DirectMARLEnv):
         self.J = np.diag([0.000023951, 0.000023951, 0.000032347])  # inertia matrix of quad, [kg m2]
 
         R = matrix_from_quat(self._robot.data.root_link_state_w[:, 3:7])
-        W = self._robot.data.root_link_state_w[:, 10:13]  # / self.W_lim
-        # print(R[3])
+        # W = self._robot.data.root_link_state_w[:, 10:13]  # / self.W_lim
         b1, b2 = R @ self.e1.view(self.num_envs, 3, 1), R @ self.e2.view(self.num_envs, 3, 1)
-
         self.o_b1 = torch.transpose(b1, 1, 2)
         self.o_b2 = torch.transpose(b2, 1, 2)
 
-        self.M1 = torch.squeeze(torch.matmul(self.o_b1, self.tau.view(self.num_envs, 3, 1))) + 0.000032347 * W[:, 2] * W[:, 1]  # M1
-        self.M2 = torch.squeeze(torch.matmul(self.o_b2, self.tau.view(self.num_envs, 3, 1))) - 0.000032347 * W[:, 2] * W[:, 0]  # M2
+        # self.M1 = torch.squeeze(torch.matmul(self.o_b1, self.tau.view(self.num_envs, 3, 1))) + 0.000032347 * W[:, 2] * W[:, 1]  # M1
+        # self.M2 = torch.squeeze(torch.matmul(self.o_b2, self.tau.view(self.num_envs, 3, 1))) - 0.000032347 * W[:, 2] * W[:, 0]  # M2
         #self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
         #self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
-        self._thrust[:, 0, :2] = 0.0
-        self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self.f + 1.0) / 2.0
-        self._moment[:, 0, 0] = self.cfg.moment_scale * torch.squeeze(self.M1)
-        self._moment[:, 0, 1] = self.cfg.moment_scale * torch.squeeze(self.M2)
-        self._moment[:, 0, 2] = self.cfg.moment_scale * torch.squeeze(self.M3)
-        # print(self._thrust)
-        #print(self._moment.shape)
+
+        self.last_thrust = 0.0
+        self.last_moment = 0.0
+        self.last_forces = 0.0
+        self.last_thrust += self._thrust[:, 0, 2]
+        self.last_moment += self._moment[:, 0, :]
+        self.last_forces += self.Forces
+
+        # self._thrust[:, 0, :2] = 0.0
+        self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (act1[:, 0] + 1.0) / 2.0 + 0.1 * act2[:, 0]
+        self._moment[:, 0, :] = self.cfg.moment_scale * (act1[:, 1:]) + 0.01 * act2[:, 1:]
+
+        fM = torch.zeros(self.num_envs, 4, device=self.device)
+        fM[:, 0] = self._thrust[:, 0, 2]
+        fM[:, 1:4] = self._moment[:, 0, :]
+        for env in range(self.num_envs):
+            self.Forces[env, :] = torch.matmul(self.fM_to_forces, fM[env, :])
+
+        thrust_change = self._thrust[:, 0, 2] - self.last_thrust
+        moment_change = self._moment.squeeze() - self.last_moment
+        forces_change = self.Forces - self.last_forces
+
+        # wind vec generating                                                                                               ***
+        # gauss wind
+        # self.wind_vel[:, :2] = torch.zeros_like(self.wind_vel[:, :2]).normal_(1.0, 0.01)
+        # self.wind_vel[:, 2] = 0.0
 
         # wind external forces
         wind_vec_b = quat_apply_inverse(self._robot.data.root_link_state_w[:, 3:7], self.wind_vel)
-        external_forces = -1.0 * self.w_coefficient * (self._robot.data.root_com_lin_vel_b - wind_vec_b)
-        # print(external_forces.shape) # (envs, 3)
-        self._thrust[:, 0, 0] += external_forces[:, 0]
-        self._thrust[:, 0, 1] += external_forces[:, 1]
-        self._thrust[:, 0, 2] += external_forces[:, 2]
-        # print(self._thrust)
+        self.external_forces = -1.0 * self.w_coefficient * (self._robot.data.root_com_lin_vel_b - wind_vec_b)
 
     def _apply_action(self):
+        thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        thrust[:, 0, 0] = self._thrust[:, 0, 0] + self.external_forces[:, 0]
+        thrust[:, 0, 1] = self._thrust[:, 0, 1] + self.external_forces[:, 1]
+        thrust[:, 0, 2] = self._thrust[:, 0, 2] + self.external_forces[:, 2]
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
-    def _get_observations(self) -> dict:
+    def _get_observations(self) -> dict[str, torch.Tensor]:
         desired_pos_b, _ = subtract_frame_transforms(
             self._robot.data.root_link_state_w[:, :3], self._robot.data.root_link_state_w[:, 3:7], self._desired_pos_w
         )
+
+        noise = torch.zeros_like(self.external_forces).normal_(0.0, 0.005)
 
         obs1 = torch.cat(
             [
@@ -267,53 +375,72 @@ class QuadcopterEnvSARLM(DirectMARLEnv):
                 desired_pos_b,
                 self.o_b1.squeeze(),
                 self.o_b2.squeeze(),
-                # wind vel
-                self.wind_vel,
             ],
             dim=-1,
         )
 
         obs2 = torch.cat(
             [
-                self._robot.data.root_com_lin_vel_b,
-                self._robot.data.root_com_ang_vel_b,
                 self._robot.data.projected_gravity_b,
                 desired_pos_b,
                 # wind vel
-                self.wind_vel,
+                self.external_forces #+ noise,
             ],
             dim=-1,
         )
-        observations = {"Translation": obs1,
-                        "Yaw": obs2, }
+        observations = {"main": obs1,
+                        "wind": obs2, }
+
+        exf_n = self.external_forces + noise
+        self.dragX_n.append(exf_n[0, 0].item())
+        self.dragY_n.append(exf_n[0, 1].item())
+        self.dragZ_n.append(exf_n[0, 2].item())
 
         return observations
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
         lin_vel = torch.sum(torch.square(self._robot.data.root_com_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_com_ang_vel_b), dim=1)
+
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_link_pos_w, dim=1)
-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+        distance_to_goal_mapped = 1 - torch.tanh(self.dFactor * (distance_to_goal - 0.0))
+
+        thrust_change = torch.square(self._thrust[:, 0, 2] - self.last_thrust)
+        moment_change = torch.sum(torch.square(self._moment.squeeze() - self.last_moment), dim=1)
+
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "encouraging": self.cfg.encouraging_scale * (torch.linalg.norm(self._desired_pos_w - self.last_pos, dim=1) - distance_to_goal) * self.step_dt,
+            "thrust_smoothing": 1.5 * thrust_change * self.step_dt,
+            "moment_smoothing": 1.5 * moment_change * self.step_dt,
+            "goal": self.bonus,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+
         # Logging
         for key, value in rewards.items():
             self._episode_sums[key] += value
-            # print("haha")
-            # print(reward.shape)
 
-        return {"Translation": reward, "Yaw": reward}
+        return {"main": (0.9 * reward), "wind": (0.1 * reward)}
 
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = torch.logical_or(
-            self._robot.data.root_link_pos_w[:, 2] < 0.05, self._robot.data.root_link_pos_w[:, 2] > 2.5
+            self._robot.data.root_link_pos_w[:, 2] < 0.05, self._robot.data.root_link_pos_w[:, 2] > 3.0,
         )
-        # print(self.max_episode_length)
+        died = torch.logical_or(died, self.Forces[:, 0] < 0.0)
+        died = torch.logical_or(died, self.Forces[:, 1] < 0.0)
+        died = torch.logical_or(died, self.Forces[:, 2] < 0.0)
+        died = torch.logical_or(died, self.Forces[:, 3] < 0.0)
+
+        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_link_pos_w, dim=1)
+        self.check = torch.where(distance_to_goal < 1.0, 1.0, 0.0)
+        self.check_count += self.check
+        self.bonus = torch.where(self.check_count > 400.0, 100, 0.0)
+        died = torch.logical_or(died, self.check_count > 401.0)
+
         ###
         terminated = {agent: died for agent in self.cfg.possible_agents}
         time_outs = {agent: time_out for agent in self.cfg.possible_agents}
@@ -352,7 +479,8 @@ class QuadcopterEnvSARLM(DirectMARLEnv):
         #self._actions[env_ids] = 0.0
 
         # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-3.0, 3.0)
+        self.dFactor = 1.25  # 1.25, 0.85, 0.5, ... <=> (2, 3, 5, ...)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
         # Reset robot state
@@ -366,9 +494,29 @@ class QuadcopterEnvSARLM(DirectMARLEnv):
 
         # reset wind velocity
         # 1. constant wind., same in all envs
-        self.wind_vel[env_ids, 0] = 5.0 # m/s
-        self.wind_vel[env_ids, 1] = 0.0
+        self.wind_vel[env_ids, 0] = 0.0 # m/s
+        self.wind_vel[env_ids, 1] = 1.0
         self.wind_vel[env_ids, 2] = 0.0
+        self.external_forces[env_ids, :] = 0.0
+
+        self.last_pos[env_ids, :] = 0.0
+        self.Forces[env_ids, :] = 0.0  # 8/05
+
+        # reset goal bonus
+        self.check[env_ids] = 0.0
+        self.check_count[env_ids] = 0.0
+        self.bonus[env_ids] = 0.0
+
+        # for testing scenario                                                                                              ***
+        # scenario 1.
+        # goal point
+        # self._desired_pos_w[env_ids, 0] = 0.0
+        # self._desired_pos_w[env_ids, 1] = 3.0
+        # self._desired_pos_w[env_ids, 2] = 1.0
+        # starting point
+        # default_root_state[:, 0] = 0.0
+        # default_root_state[:, 1] = 0.0
+        # default_root_state[:, 2] = 1.0
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome
